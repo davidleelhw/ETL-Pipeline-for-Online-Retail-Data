@@ -1,4 +1,7 @@
-# Ignore .env file
+# Ignore files
 .env
-# Ignore venv folder
+launch.json
+# Ignore folders
 venv/
+Data/
+logs/
