@@ -1,7 +1,11 @@
 # Ignore files
 .env
-launch.json
+temp.csv
+
 # Ignore folders
 venv/
 Data/
 logs/
+__pycache__
+.pytest_cache
+.vscode
