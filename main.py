@@ -29,9 +29,64 @@ logging.basicConfig(
     ]
 )
 
-def load_data(file_path):
+def connect_to_db():
+    """Connect to PostgreSQL database."""
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
+        logging.info("Connected to the database.")
+        return conn
+    except Exception as e:
+        logging.error(f"Error connecting to the database: {e}")
+        raise
+
+def create_tables(conn):
+    """Create tables in PostgreSQL."""
+    try:
+        start = time.time()
+        with conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS onlineretail.customers (
+                customerid INT PRIMARY KEY,
+                country VARCHAR(100)
+            );
+            
+            CREATE TABLE IF NOT EXISTS onlineretail.products (
+                stockcode VARCHAR(20) PRIMARY KEY,
+                description TEXT,
+                unitprice NUMERIC
+            );
+            
+            CREATE TABLE IF NOT EXISTS onlineretail.orders (
+                invoiceno VARCHAR(20) PRIMARY KEY,
+                customerid INT REFERENCES onlineretail.customers(customerid),
+                invoicedate TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS onlineretail.orderdetails (
+                orderdetailid INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                invoiceno VARCHAR(20) REFERENCES onlineretail.orders(invoiceno),
+                stockcode VARCHAR(20) REFERENCES onlineretail.products(stockcode),
+                quantity INT,
+                unitprice NUMERIC
+            );
+            """)
+            conn.commit()
+            logging.info("Tables created successfully.")
+            logging.info(f"Tables creation took {time.time() - start:.2f} seconds.")
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Error creating tables: {e}")
+        raise
+
+def extract_data(file_path):
     """
-    Load CSV data into a pandas DataFrame.
+    Extract CSV data into a pandas DataFrame.
     Parameters:
         file_path (str): The path to the CSV file to be loaded.
     Returns:
@@ -40,11 +95,11 @@ def load_data(file_path):
     try:
         start = time.time()
         df = pd.read_csv(file_path)
-        logging.info(f"Data loaded successfully from CSV. DataFrame Shape: {df.shape}.")
-        logging.info(f"Data loading took {time.time() - start:.2f} seconds.")
+        logging.info(f"Data extracted successfully from CSV. DataFrame Shape: {df.shape}.")
+        logging.info(f"Data extracting took {time.time() - start:.2f} seconds.")
         return df
     except Exception as e:
-        logging.error(f"Error loading CSV file: {e}")
+        logging.error(f"Error extracting CSV file: {e}")
         raise
 
 def transform_data(df):
@@ -98,21 +153,96 @@ def transform_data(df):
         logging.error(f"Error transforming data: {e}")
         raise
 
+def load_data(conn, df):
+    """Insert data into PostgreSQL with independent transactions for each table."""
+    
+    # Insert into customers
+    try:
+        start = time.time()
+        with conn.cursor() as cur:
+            customers = df[['CustomerID', 'Country']].drop_duplicates()
+            for index, row in customers.iterrows():
+                cur.execute("""
+                    INSERT INTO onlineretail.customers (customerid, country)
+                    VALUES (%s, %s)
+                    ON CONFLICT (customerid) DO NOTHING;
+                """, (row['CustomerID'], row['Country']))
+            conn.commit()  # Commit after inserting customers
+            logging.info(f"{len(customers)} customers inserted.")
+            logging.info(f"Customers insertion took {time.time() - start:.2f} seconds.")
+    except Exception as e:
+        logging.error(f"Error inserting customers: {e}")
+    
+    # Insert into products
+    try:
+        start = time.time()
+        with conn.cursor() as cur:
+            products = df[['StockCode', 'Description', 'UnitPrice']].drop_duplicates()
+            for index, row in products.iterrows():
+                cur.execute("""
+                    INSERT INTO onlineretail.products (stockcode, description, unitprice)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (stockcode) DO NOTHING;
+                """, (row['StockCode'], row['Description'], row['UnitPrice']))
+            conn.commit()  # Commit after inserting products
+            logging.info(f"{len(products)} products inserted.")
+            logging.info(f"Products insertion took {time.time() - start:.2f} seconds.")
+    except Exception as e:
+        logging.error(f"Error inserting products: {e}")
+    
+    # Insert into orders
+    try:
+        start = time.time()
+        with conn.cursor() as cur:
+            orders = df[['InvoiceNo', 'CustomerID', 'InvoiceDate']].drop_duplicates()
+            for index, row in orders.iterrows():
+                cur.execute("""
+                    INSERT INTO onlineretail.orders (invoiceno, customerid, invoicedate)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (invoiceno) DO NOTHING;
+                """, (row['InvoiceNo'], row['CustomerID'], row['InvoiceDate']))
+            conn.commit()  # Commit after inserting orders
+            logging.info(f"{len(orders)} orders inserted.")
+            logging.info(f"Orders insertion took {time.time() - start:.2f} seconds.")
+    except Exception as e:
+        logging.error(f"Error inserting orders: {e}")
+    
+    # Insert into orderdetails
+    try:
+        start = time.time()
+        with conn.cursor() as cur:
+            order_details = df[['InvoiceNo', 'StockCode', 'Quantity', 'UnitPrice']]
+            for index, row in order_details.iterrows():
+                cur.execute("""
+                    INSERT INTO onlineretail.orderdetails (invoiceno, stockcode, quantity, unitprice)
+                    VALUES (%s, %s, %s, %s);
+                """, (row['InvoiceNo'], row['StockCode'], row['Quantity'], row['UnitPrice']))
+            conn.commit()  # Commit after inserting orderdetails
+            logging.info(f"{len(order_details)} order details inserted.")
+            logging.info(f"Order details insertion took {time.time() - start:.2f} seconds.")
+    except Exception as e:
+        logging.error(f"Error inserting order details: {e}")
+
 def main():
     start_time = time.time()
     # Extract
     csv_path = os.path.join('Data', 'Online Retail.csv')
-    df = load_data(csv_path)
+    df = extract_data(csv_path)
 
     # Transform
     df = transform_data(df)
     df.to_csv("temp.csv")
     
     # Connect to DB and create tables
+    conn = connect_to_db()
+    create_tables(conn)
 
     # Load data into the database
+    load_data(conn, df)
 
     # Close connection
+    conn.close()
+    logging.info("Database connection closed.")
 
     # Timing the run
     end_time = time.time()
